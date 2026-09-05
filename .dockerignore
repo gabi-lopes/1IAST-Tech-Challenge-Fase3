@@ -1,0 +1,14 @@
+.venv/
+.git/
+.github/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+notebooks/
+images/*.png
+data/gold/
+data/model/
+reports/*.csv
+reports/*.json
+.env
+*.md
