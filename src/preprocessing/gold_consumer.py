@@ -6,9 +6,8 @@ Consome os datasets da camada Gold gerados pela pipeline da Fase 2
 o time não precise rodar a pipeline (nem ter credenciais AWS) toda vez.
 
 Ordem de resolução ao carregar um dataset:
-    1. Cache local (data/gold/<nomeDoRoleDagold>.parquet)         →  offline
-    2. S3 da pipeline da Fase 2 (se credenciais AWS)  → baixa e salva no cache
-    3. Fallback: gold local reconstruída pelo notebook 01 (se existir em algum lugar do repositório) → offline
+    1. Cache local (data/gold/<nome>.parquet)        →  offline, sem AWS
+    2. S3 da pipeline da Fase 2 (se credenciais AWS) →  baixa e salva no cache
 
 Uso como script (baixa tudo do S3 e salva localmente):
     python -m src.preprocessing.gold_consumer            # usa cache se existir
@@ -29,7 +28,18 @@ import pandas as pd
 
 try:
     from dotenv import load_dotenv
-except ImportError:  # python-dotenv não instalado — segue sem .env (usa aws configure)
+except ImportError:  # python-dotenv ausente: segue sem .env, mas AVISA (não falha em silêncio)
+    import warnings
+
+    warnings.warn(
+        "python-dotenv não instalado: o arquivo .env NÃO será carregado. "
+        "As credenciais AWS precisam estar no ambiente (variáveis de ambiente ou "
+        "'aws configure'), senão a leitura do S3 falha com 'ACCESS_DENIED'. "
+        "Corrija com: pip install -r requirements.txt",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
     def load_dotenv(*args, **kwargs):
         return None
 
@@ -39,7 +49,8 @@ ROOT = Path(__file__).resolve().parents[2]          # raiz do repositório
 load_dotenv(ROOT / ".env")                          # carrega credenciais AWS, se existirem
 LOCAL_GOLD_DIR = ROOT / "data" / "gold"             # cache local (gitignored)
 
-# Bucket da pipeline da Fase 2 (gold_builder.py grava aqui)
+# Bucket da pipeline da Fase 2 (gold_builder.py grava aqui). Fixo de propósito:
+# é a fonte oficial da Gold. A variável S3_BUCKET_NAME do .env NÃO é usada aqui.
 S3_GOLD_DIR = "s3://tech-challenge-fase2-fiap-vitor/layers/gold"
 
 # Datasets gerados pelo gold_builder.py da Fase 2.
@@ -51,11 +62,6 @@ GOLD_DATASETS = {
     "meta_vs_realizado_uf": {"partitioned": True},
     "evolucao_uf":          {"partitioned": False},
     "painel_nacional":      {"partitioned": False},
-}
-
-# Fallback: gold reconstruída localmente pelo notebook 01_gold_layer_build_
-NOTEBOOK_GOLD_FALLBACK = {
-    "indicador_municipio": LOCAL_GOLD_DIR / "gold_indicador_municipio.parquet",
 }
 
 logging.basicConfig(
@@ -132,25 +138,16 @@ def load_gold(name: str, force_refresh: bool = False) -> pd.DataFrame:
         _save_local(df, name)
         return df
     except ImportError as e:
-        log.warning(f"Dependência ausente para ler do S3 ({e}). Instale: pip install s3fs")
+        log.warning(f"Dependência ausente para ler do S3 ({e}). Rode: pip install -r requirements.txt")
     except Exception as e:
         log.warning(f"Não foi possível ler '{name}' do S3: {type(e).__name__}: {e}")
 
-    # 3) Fallback: gold reconstruída pelo notebook 01
-    fallback = NOTEBOOK_GOLD_FALLBACK.get(name)
-    if fallback and fallback.exists():
-        log.info(f"Usando fallback do notebook 01: {fallback.relative_to(ROOT)}")
-        return pd.read_parquet(fallback)
-
     raise FileNotFoundError(
-        f"Dataset '{name}' indisponível: sem cache local, sem acesso ao S3 "
-        f"e sem fallback local.\n"
+        f"Dataset '{name}' indisponível: sem cache local e sem acesso ao S3.\n"
         f"Opções:\n"
-        f"  a) configure as credenciais AWS (.env / aws configure) e rode:\n"
-        f"     python -m src.preprocessing.gold_consumer\n"
-        f"  b) peça a alguém do time o arquivo data/gold/{name}.parquet\n"
-        f"  c) rode o notebook notebooks/01_gold_layer_build_.ipynb para "
-        f"reconstruir a gold a partir de data/raw/"
+        f"  a) configure as credenciais AWS (.env ou 'aws configure') e rode:\n"
+        f"     python -m src.preprocessing.gold_consumer --refresh\n"
+        f"  b) peça a alguém do time o arquivo data/gold/{name}.parquet"
     )
 
 

@@ -1,51 +1,47 @@
 """
 Pipeline do Modelo D — Alfabetização (defasagem temporal)
 -----------------------------------------------------------
-Treina e salva o Modelo D: usa só dado do ano anterior (2023) pra prever
-o resultado do ano seguinte (2024). Corrige o vazamento de dados do
-Modelo A (notebook 03), que usava features do mesmo ano do resultado.
+Treina e salva o modelo final da Fase 3: usa só dado do ano anterior (2023)
+pra prever se o município fica EM RISCO EDUCACIONAL no ano seguinte (2024).
+Nenhuma feature do mesmo ano do target — sem data leakage
+(ver notebooks/03a_diagnostico_vazamento_dados.ipynb).
 
-Reproduz, em formato de script/pipeline formal, a lógica já validada
-no notebook 03b_modelo_defasagem_temporal.ipynb.
+Target: em_risco = (taxa_alfabetizacao < taxa_media_nacional[ano]).
+Classe positiva = município abaixo do nível médio do país.
 
-Uso como script (treina e salva o modelo em data/model/):
+Uso como script (treina, avalia, salva o modelo + model card):
     python -m src.modeling.pipeline_modelo_d
-    python -m src.modeling.pipeline_modelo_d --refresh   # força re-download do Gold no S3
+    python -m src.modeling.pipeline_modelo_d --refresh   # re-baixa a Gold do S3
 
 Uso como módulo:
-    from src.modeling.pipeline_modelo_d import run_pipeline
-    resultado = run_pipeline()
-    resultado["pipeline"]      # sklearn Pipeline treinado, pronto pra .predict()
-    resultado["metricas"]      # dict com accuracy/precision/recall/f1/auc
+    from src.modeling.pipeline_modelo_d import run_pipeline, predict
+    r = run_pipeline()
+    r["pipeline"]   # sklearn Pipeline treinado
+    r["metricas"]   # holdout + validação cruzada por UF
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
-from pathlib import Path
+from datetime import datetime, timezone
 
-import duckdb
 import joblib
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import (
-    accuracy_score, auc, f1_score, precision_score, recall_score, roc_curve,
-)
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
+from src import config
+from src.evaluation.metrics import cv_metrics, holdout_metrics
+from src.preprocessing.features import (
+    build_inference_frame, build_lagged_frame, ref_nacional_por_ano,
+)
 from src.preprocessing.gold_consumer import load_gold
-
-ROOT = Path(__file__).resolve().parents[2]
-MODEL_PATH = ROOT / "data" / "model" / "modelo_d_defasagem_temporal.pkl"
-
-FEATURE_COLS = [
-    "media_portugues_ant", "taxa_alfabetizacao_ant", "percentual_participacao_ant",
-    "meta_2024", "meta_2025", "meta_2026", "meta_2027", "meta_2028", "meta_2029", "meta_2030",
-]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,173 +50,158 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-
-# ── Etapas da pipeline ──────────────────────────────────────────────────────
-
-def _preparar_um_por_ano(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    1 linha por (município, ano).
-
-    O Gold oficial do S3 (pipeline da Fase 2) já vem assim — não separa por
-    rede. A reconstrução local (notebook 01) tem duplicidade Estadual/Privada;
-    quando a coluna `rede_label` existir, agregamos as duas antes de seguir
-    (evita o LAG parear ano errado). Nos dois casos, o resultado é 1 linha
-    por município-ano.
-    """
-    filtro_rede = "WHERE rede_label IN ('Estadual', 'Privada')" if "rede_label" in df.columns else ""
-    return duckdb.sql(f"""
-        SELECT id_municipio, ano,
-               AVG(taxa_alfabetizacao) AS taxa_alfabetizacao,
-               AVG(media_portugues)    AS media_portugues,
-               AVG(percentual_participacao) AS percentual_participacao,
-               AVG(meta_2024) AS meta_2024, AVG(meta_2025) AS meta_2025, AVG(meta_2026) AS meta_2026,
-               AVG(meta_2027) AS meta_2027, AVG(meta_2028) AS meta_2028, AVG(meta_2029) AS meta_2029,
-               AVG(meta_2030) AS meta_2030
-        FROM df
-        {filtro_rede}
-        GROUP BY id_municipio, ano
-    """).df()
+MODEL_PATH = config.MODEL_PATH  # retrocompat p/ quem importa daqui
 
 
-def _construir_features_defasadas(um_por_ano: pd.DataFrame) -> pd.DataFrame:
-    """Traz os valores do ano anterior pra mesma linha do ano seguinte (LAG)."""
-    return duckdb.sql("""
-        SELECT
-            id_municipio,
-            ano,
-            taxa_alfabetizacao AS taxa_alfabetizacao_atual,
-            (taxa_alfabetizacao >= 50)::INT AS target,
-            LAG(media_portugues)          OVER w AS media_portugues_ant,
-            LAG(taxa_alfabetizacao)       OVER w AS taxa_alfabetizacao_ant,
-            LAG(percentual_participacao)  OVER w AS percentual_participacao_ant,
-            meta_2024, meta_2025, meta_2026, meta_2027, meta_2028, meta_2029, meta_2030
-            -- as metas ficam sem defasagem: são valores definidos ANTES do resultado
-            -- do ano vigente (meta oficial do programa, não consequência do resultado)
-        FROM um_por_ano
-        WINDOW w AS (PARTITION BY id_municipio ORDER BY ano)
-        QUALIFY taxa_alfabetizacao_ant IS NOT NULL
-        ORDER BY id_municipio
-    """).df()
+# ── Pipeline ─────────────────────────────────────────────────────────────────
 
-
-def _montar_pipeline() -> Pipeline:
-    preprocessor = ColumnTransformer(transformers=[
-        ("num", SimpleImputer(strategy="median"), FEATURE_COLS),
+def build_pipeline() -> Pipeline:
+    """Pré-processamento (imputação + scaling) + regressão logística, num Pipeline só."""
+    num = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
     ])
+    preprocessor = ColumnTransformer(transformers=[("num", num, config.FEATURE_COLS)])
     return Pipeline(steps=[
         ("preprocessor", preprocessor),
-        ("model", RandomForestClassifier(
-            n_estimators=200, max_depth=10, min_samples_leaf=5, random_state=42, n_jobs=-1,
-        )),
+        ("model", LogisticRegression(**config.LOGREG_PARAMS)),
     ])
-
-
-def _avaliar(pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
-    y_pred = pipeline.predict(X_test)
-    y_proba = pipeline.predict_proba(X_test)[:, 1]
-    fpr, tpr, _ = roc_curve(y_test, y_proba)
-    return {
-        "accuracy": accuracy_score(y_test, y_pred),
-        "precision": precision_score(y_test, y_pred),
-        "recall": recall_score(y_test, y_pred),
-        "f1": f1_score(y_test, y_pred),
-        "auc": auc(fpr, tpr),
-        "n_teste": len(X_test),
-        "baseline": max(y_test.mean(), 1 - y_test.mean()),
-    }
 
 
 # ── API pública ──────────────────────────────────────────────────────────────
 
 def run_pipeline(force_refresh: bool = False, save: bool = True) -> dict:
-    """
-    Roda a pipeline completa do Modelo D: carrega o Gold, prepara as features
-    defasadas, treina, avalia e (por padrão) salva o modelo em data/model/.
-    """
-    log.info("1/5 — Carregando Gold (indicador_municipio)...")
-    df = load_gold("indicador_municipio", force_refresh=force_refresh)
-    log.info(f"      {len(df)} registros carregados")
+    """Carrega a Gold, monta as features defasadas, treina, avalia e salva."""
+    log.info("1/5 — Carregando Gold (%s + %s)...", config.GOLD_DATASET, config.GOLD_REF_NACIONAL)
+    gold = load_gold(config.GOLD_DATASET, force_refresh=force_refresh)
+    ref = ref_nacional_por_ano(load_gold(config.GOLD_REF_NACIONAL, force_refresh=force_refresh))
+    log.info("      %d registros | referência nacional: %s", len(gold), ref)
 
-    log.info("2/5 — Agregando Estadual/Privada (1 linha por município-ano)...")
-    um_por_ano = _preparar_um_por_ano(df)
-
-    log.info("3/5 — Construindo features defasadas (LAG do ano anterior)...")
-    lagged = _construir_features_defasadas(um_por_ano)
-    log.info(f"      {len(lagged)} pares (ano anterior -> ano atual) disponíveis")
-
-    if lagged.empty:
+    log.info("2/5 — Montando features defasadas (LAG do ano anterior) + target...")
+    frame = build_lagged_frame(gold, ref)
+    if frame.empty:
         raise ValueError(
-            "Nenhum par (ano anterior -> ano atual) encontrado — verifique se o "
-            "Gold tem pelo menos 2 anos de dado por município."
+            "Nenhum par (ano anterior -> ano atual) com target definido. "
+            "A Gold precisa de >= 2 anos por município e de meta_ano_vigente."
         )
+    X = frame[config.FEATURE_COLS]
+    y = frame[config.TARGET_COL]
+    groups = frame[config.GROUP_COL]
+    log.info("      %d municípios | %.1f%% em risco | %d UFs",
+             len(frame), 100 * y.mean(), groups.nunique())
 
-    X = lagged[FEATURE_COLS].copy()
-    y = lagged["target"].copy()
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y,
-    )
+    log.info("3/5 — Holdout estratificado (20%%, municípios não vistos)...")
+    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=config.RANDOM_STATE)
+    tr, te = next(splitter.split(X, y))
+    X_train, X_test, y_train, y_test = X.iloc[tr], X.iloc[te], y.iloc[tr], y.iloc[te]
 
-    log.info("4/5 — Treinando o Modelo D (RandomForest, features defasadas)...")
-    pipeline = _montar_pipeline()
-    pipeline.fit(X_train, y_train)
+    log.info("4/5 — Treinando (%s, class_weight=balanced)...", config.FINAL_MODEL)
+    pipe = build_pipeline()
+    pipe.fit(X_train, y_train)
+    y_pred = pipe.predict(X_test)
+    y_proba = pipe.predict_proba(X_test)[:, 1]
 
-    metricas = _avaliar(pipeline, X_test, y_test)
+    holdout = holdout_metrics(pipe, X_test, y_test)
+    cv = cv_metrics(build_pipeline(), X, y, groups)
     log.info(
-        "      Accuracy: %.1f%% | Precision: %.1f%% | Recall: %.1f%% | "
-        "F1: %.1f%% | AUC-ROC: %.3f | baseline: %.1f%%",
-        metricas["accuracy"] * 100, metricas["precision"] * 100,
-        metricas["recall"] * 100, metricas["f1"] * 100,
-        metricas["auc"], metricas["baseline"] * 100,
+        "      HOLDOUT  recall_risco: %.1f%% | precision_risco: %.1f%% | "
+        "PR-AUC: %.3f | ROC-AUC: %.3f | acc: %.1f%% (baseline %.1f%%)",
+        100 * holdout["recall_risco"], 100 * holdout["precision_risco"],
+        holdout["pr_auc"], holdout["roc_auc"],
+        100 * holdout["accuracy"], 100 * holdout["baseline_acuracia"],
     )
+    log.info(
+        "      CV/UF    recall_risco: %.1f%%±%.1f | PR-AUC: %.3f±%.3f | ROC-AUC: %.3f±%.3f",
+        100 * cv["recall"]["media"], 100 * cv["recall"]["desvio"],
+        cv["average_precision"]["media"], cv["average_precision"]["desvio"],
+        cv["roc_auc"]["media"], cv["roc_auc"]["desvio"],
+    )
+
+    # modelo final: treina em tudo antes de salvar
+    pipe_final = build_pipeline().fit(X, y)
+    metricas = {"holdout_municipios": holdout, "cv_por_uf": cv}
 
     if save:
-        log.info("5/5 — Salvando modelo treinado...")
-        MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(pipeline, MODEL_PATH)
-        log.info(f"      ✔ Salvo em: {MODEL_PATH.relative_to(ROOT)}")
+        log.info("5/5 — Salvando modelo + model card...")
+        config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(pipe_final, config.MODEL_PATH)
+        _salvar_model_card(gold, frame, metricas, ref)
+        log.info("      OK: %s", config.MODEL_PATH.relative_to(config.ROOT))
+        log.info("      OK: %s", config.MODEL_CARD_PATH.relative_to(config.ROOT))
 
     return {
-        "pipeline": pipeline,
+        "pipeline": pipe_final,
         "metricas": metricas,
         "n_treino": len(X_train),
         "n_teste": len(X_test),
-        "feature_cols": FEATURE_COLS,
+        "n_total": len(frame),
+        "feature_cols": config.FEATURE_COLS,
+        # arrays do holdout — pra visualização / inspeção fora daqui
+        "X_test": X_test, "y_test": y_test, "y_pred": y_pred, "y_proba": y_proba,
     }
 
 
-def predict(pipeline: Pipeline, df_ano_anterior: pd.DataFrame) -> pd.Series:
-    """
-    Aplica o Modelo D já treinado em dado de um ano anterior real, pra gerar
-    a previsão do ano seguinte (ex.: usar 2024 pra prever 2025).
+def predict(pipeline: Pipeline, frame_features: pd.DataFrame) -> pd.Series:
+    """Aplica o modelo treinado num frame que já tenha config.FEATURE_COLS."""
+    return pd.Series(pipeline.predict(frame_features[config.FEATURE_COLS]), name=config.TARGET_COL)
 
-    df_ano_anterior precisa ter as colunas: media_portugues, taxa_alfabetizacao,
-    percentual_participacao (do ano anterior) + meta_2024..meta_2030.
-    """
-    entrada = pd.DataFrame({
-        "media_portugues_ant": df_ano_anterior["media_portugues"],
-        "taxa_alfabetizacao_ant": df_ano_anterior["taxa_alfabetizacao"],
-        "percentual_participacao_ant": df_ano_anterior["percentual_participacao"],
-        **{c: df_ano_anterior[c] for c in
-           ["meta_2024", "meta_2025", "meta_2026", "meta_2027", "meta_2028", "meta_2029", "meta_2030"]},
-    })
-    return pipeline.predict(entrada[FEATURE_COLS])
+
+def predict_ano_seguinte(pipeline: Pipeline, gold: pd.DataFrame, ano_base: int) -> pd.DataFrame:
+    """Previsão de risco pro ano seguinte a `ano_base` (extrapolação, sem validação)."""
+    feats = build_inference_frame(gold, ano_base)
+    proba = pipeline.predict_proba(feats[config.FEATURE_COLS])[:, 1]
+    return feats[["id_municipio", config.GROUP_COL]].assign(
+        prob_risco=proba,
+        em_risco=(proba >= 0.5).astype(int),
+    )
+
+
+# ── Model card ───────────────────────────────────────────────────────────────
+
+def _salvar_model_card(gold: pd.DataFrame, frame: pd.DataFrame, metricas: dict,
+                       ref_nacional: dict) -> None:
+    card = {
+        "modelo": f"Modelo D — defasagem temporal ({config.FINAL_MODEL})",
+        "gerado_em": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "gold": {
+            "dataset": config.GOLD_DATASET,
+            "n_linhas": int(len(gold)),
+            "anos": sorted(int(a) for a in gold["ano"].dropna().unique()),
+            "colunas": sorted(gold.columns),
+        },
+        "target": {
+            "coluna": config.TARGET_COL,
+            "definicao": "taxa_alfabetizacao < taxa_media_nacional[ano]",
+            "referencia_nacional_por_ano": {int(a): float(t) for a, t in ref_nacional.items()},
+            "n_amostras": int(len(frame)),
+            "prevalencia_risco": float(frame[config.TARGET_COL].mean()),
+        },
+        "features": config.FEATURE_COLS,
+        "hiperparametros": config.LOGREG_PARAMS,
+        "metricas": metricas,
+        "limitacoes": [
+            "Gold só tem 2023 e 2024 — uma única transição temporal.",
+            "Holdout é cross-municípios do mesmo ano, não validação temporal.",
+            "Previsão de anos futuros é extrapolação não validada.",
+        ],
+    }
+    config.MODEL_CARD_PATH.write_text(json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Treina e salva o Modelo D (defasagem temporal) de alfabetização."
     )
-    parser.add_argument(
-        "--refresh", action="store_true",
-        help="Força re-download do Gold no S3, ignorando o cache local.",
-    )
+    parser.add_argument("--refresh", action="store_true",
+                        help="Força re-download da Gold no S3, ignorando o cache local.")
     args = parser.parse_args()
 
-    log.info("=" * 60)
+    log.info("=" * 64)
     log.info("Pipeline — Modelo D (defasagem temporal)")
-    log.info("=" * 60)
+    log.info("=" * 64)
     run_pipeline(force_refresh=args.refresh)
 
 

@@ -1,10 +1,12 @@
 """
-Demonstração — Previsão para o próximo ano com o Modelo D
-------------------------------------------------------------
-Pega o último ano disponível no Gold, usa o modelo já treinado
-(data/model/modelo_d_defasagem_temporal.pkl) e prevê o ano seguinte
-pra cada município. É a mesma lógica da pipeline, só que aplicada
-em dado real (sem saber a resposta), pra mostrar a previsão de verdade.
+Demonstração — Previsão de risco para o próximo ano
+---------------------------------------------------
+Pega o último ano disponível na Gold, aplica o modelo já treinado
+(data/model/modelo_d_defasagem_temporal.pkl) e estima, pra cada município, a
+probabilidade de ficar EM RISCO de não bater a meta no ano seguinte.
+
+⚠️ É extrapolação: o modelo foi validado só na transição 2023 -> 2024. A saída
+serve de demonstração, não de previsão validada.
 
 Uso:
     python -m src.modeling.prever_proximo_ano
@@ -14,46 +16,39 @@ from __future__ import annotations
 
 import joblib
 
-from src.modeling.pipeline_modelo_d import MODEL_PATH, _preparar_um_por_ano, predict
+from src import config
+from src.modeling.pipeline_modelo_d import predict_ano_seguinte
 from src.preprocessing.gold_consumer import load_gold
 
 
-def main():
+def main() -> None:
     print("Carregando Gold...")
-    df = load_gold("indicador_municipio")
-    um_por_ano = _preparar_um_por_ano(df)
+    gold = load_gold(config.GOLD_DATASET)
 
-    ultimo_ano = int(um_por_ano["ano"].max())
-    proximo_ano = ultimo_ano + 1
-    print(f"Último ano disponível: {ultimo_ano} -> prevendo {proximo_ano}")
+    ano_base = int(gold["ano"].max())
+    ano_alvo = ano_base + 1
+    print(f"Último ano na Gold: {ano_base} -> prevendo risco em {ano_alvo}")
 
-    dados_ultimo_ano = um_por_ano[um_por_ano["ano"] == ultimo_ano].copy()
-    print(f"{len(dados_ultimo_ano)} municípios com dado em {ultimo_ano}")
-
-    print("Carregando modelo treinado...")
-    if not MODEL_PATH.exists():
+    if not config.MODEL_PATH.exists():
         raise FileNotFoundError(
-            f"Modelo não encontrado em {MODEL_PATH}. Rode antes:\n"
+            f"Modelo não encontrado em {config.MODEL_PATH}. Rode antes:\n"
             f"    python -m src.modeling.pipeline_modelo_d"
         )
-    pipeline = joblib.load(MODEL_PATH)
+    pipeline = joblib.load(config.MODEL_PATH)
 
     print("Prevendo...")
-    previsoes = predict(pipeline, dados_ultimo_ano)
+    pred = predict_ano_seguinte(pipeline, gold, ano_base).sort_values("prob_risco", ascending=False)
 
-    resultado = dados_ultimo_ano[["id_municipio"]].copy()
-    resultado["taxa_alfabetizacao_" + str(ultimo_ano)] = dados_ultimo_ano["taxa_alfabetizacao"]
-    resultado[f"previsao_bate_meta_{proximo_ano}"] = previsoes
+    n = len(pred)
+    n_risco = int(pred["em_risco"].sum())
+    print(f"\n{n} municípios | {n_risco} previstos EM RISCO em {ano_alvo} ({n_risco / n * 100:.1f}%)")
+    print(f"\nTop 10 municípios com maior risco previsto pra {ano_alvo}:")
+    print(pred.head(10).to_string(index=False))
 
-    print(f"\nExemplo (10 primeiros municípios) — previsão pra {proximo_ano}:")
-    print(resultado.head(10).to_string(index=False))
-
-    total = len(resultado)
-    positivos = int(previsoes.sum())
-    print(
-        f"\nResumo: {positivos}/{total} municípios previstos para bater "
-        f"a meta de alfabetização em {proximo_ano} ({positivos / total * 100:.1f}%)"
-    )
+    saida = config.REPORTS_DIR / f"previsao_risco_{ano_alvo}.csv"
+    config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    pred.to_csv(saida, index=False)
+    print(f"\nRanking completo salvo em: {saida.relative_to(config.ROOT)}")
 
 
 if __name__ == "__main__":
