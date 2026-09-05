@@ -1,0 +1,103 @@
+{
+  "modelo": "Modelo D — defasagem temporal (logistic_regression)",
+  "gerado_em": "2026-09-05T16:29:28+00:00",
+  "gold": {
+    "dataset": "indicador_municipio",
+    "n_linhas": 11030,
+    "anos": [
+      2023,
+      2024
+    ],
+    "colunas": [
+      "ano",
+      "bateu_meta_2030",
+      "classificacao",
+      "diferenca_meta",
+      "id_municipio",
+      "media_portugues",
+      "meta_2024",
+      "meta_2025",
+      "meta_2026",
+      "meta_2027",
+      "meta_2028",
+      "meta_2029",
+      "meta_2030",
+      "meta_ano_vigente",
+      "nivel_alfabetizacao",
+      "percentual_participacao",
+      "taxa_alfabetizacao",
+      "taxa_meta_base"
+    ]
+  },
+  "target": {
+    "coluna": "em_risco",
+    "definicao": "taxa_alfabetizacao < taxa_media_nacional[ano]",
+    "referencia_nacional_por_ano": {
+      "2023": 55.32,
+      "2024": 57.36
+    },
+    "n_amostras": 5480,
+    "prevalencia_risco": 0.37828467153284673
+  },
+  "features": [
+    "taxa_alfabetizacao_ant",
+    "media_portugues_ant",
+    "percentual_participacao_ant"
+  ],
+  "hiperparametros": {
+    "max_iter": 1000,
+    "class_weight": "balanced",
+    "random_state": 42
+  },
+  "metricas": {
+    "holdout_municipios": {
+      "accuracy": 0.7344890510948905,
+      "precision_risco": 0.623015873015873,
+      "recall_risco": 0.7566265060240964,
+      "f1_risco": 0.6833514689880305,
+      "roc_auc": 0.8169063920881764,
+      "pr_auc": 0.7489404178572809,
+      "baseline_acuracia": 0.6213503649635037,
+      "prevalencia_risco": 0.37864963503649635,
+      "confusao": {
+        "tn": 491,
+        "fp": 190,
+        "fn": 101,
+        "tp": 314
+      },
+      "n_teste": 1096
+    },
+    "cv_por_uf": {
+      "esquema": "GroupKFold por UF (n_splits=5)",
+      "accuracy": {
+        "media": 0.7314301371377505,
+        "desvio": 0.04116047596683151
+      },
+      "precision": {
+        "media": 0.6247223592874254,
+        "desvio": 0.11872454853346719
+      },
+      "recall": {
+        "media": 0.7554284490344448,
+        "desvio": 0.15341057663332236
+      },
+      "f1": {
+        "media": 0.6627260648849231,
+        "desvio": 0.0851548014729873
+      },
+      "roc_auc": {
+        "media": 0.8361693969116862,
+        "desvio": 0.04656141343207426
+      },
+      "average_precision": {
+        "media": 0.7554089151960492,
+        "desvio": 0.07293707660965215
+      }
+    }
+  },
+  "limitacoes": [
+    "Gold só tem 2023 e 2024 — uma única transição temporal.",
+    "Holdout é cross-municípios do mesmo ano, não validação temporal.",
+    "Previsão de anos futuros é extrapolação não validada."
+  ]
+}

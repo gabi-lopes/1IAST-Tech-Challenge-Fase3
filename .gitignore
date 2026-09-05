@@ -6,3 +6,4 @@ data/gold/*.parquet
 reports/*.joblib
 .DS_Store
 .env
+data/model/*.pkl
