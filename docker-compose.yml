@@ -1,0 +1,15 @@
+# Conveniência: encapsula volumes + .env + comando da pipeline.
+# NÃO é orquestração (o projeto é um job batch, não um conjunto de serviços).
+#
+#   docker compose run --rm pipeline              # pipeline completa (usa cache local da Gold)
+#   docker compose run --rm pipeline python -m src.run_all --refresh   # re-baixa a Gold
+services:
+  pipeline:
+    build: .
+    env_file:
+      - .env                # credenciais AWS — só necessárias para --refresh
+    volumes:
+      - ./data:/app/data    # cache da Gold + modelo treinado
+      - ./reports:/app/reports
+      - ./images:/app/images
+    command: python -m src.run_all

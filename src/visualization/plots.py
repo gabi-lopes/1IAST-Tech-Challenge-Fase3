@@ -137,21 +137,26 @@ def risco_por_uf(pred: pd.DataFrame, ano_alvo: int) -> plt.Figure:
 
 # ── Orquestração ─────────────────────────────────────────────────────────────
 
-def gerar_todas() -> list[str]:
-    """Roda a pipeline e gera todas as figuras da entrega em images/."""
+def gerar_todas(resultado: dict | None = None) -> list[str]:
+    """
+    Gera todas as figuras da entrega em images/.
+
+    `resultado` = dict devolvido por `run_pipeline` (evita re-treinar). Se None,
+    roda a pipeline sem salvar.
+    """
     from src.evaluation import interpretability, metrics
     from src.modeling.pipeline_modelo_d import predict_ano_seguinte, run_pipeline
-    from src.preprocessing.features import build_lagged_frame, ref_nacional_por_ano
+    from src.preprocessing.features import ref_nacional_por_ano
     from src.preprocessing.gold_consumer import load_gold
 
+    r = resultado or run_pipeline(save=False)
     gold = load_gold(config.GOLD_DATASET)
     ref = ref_nacional_por_ano(load_gold(config.GOLD_REF_NACIONAL))
-    frame = build_lagged_frame(gold, ref)
+    frame = r["frame"]
     X = frame[config.FEATURE_COLS]
     y = frame[config.TARGET_COL]
     groups = frame[config.GROUP_COL]
 
-    r = run_pipeline(save=False)
     pipe = r["pipeline"]
     comp = metrics.comparar_modelos(X, y, groups)
     sv = interpretability.shap_explanation(pipe, X)
