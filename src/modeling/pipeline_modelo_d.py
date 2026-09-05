@@ -137,6 +137,7 @@ def run_pipeline(force_refresh: bool = False, save: bool = True) -> dict:
         "n_teste": len(X_test),
         "n_total": len(frame),
         "feature_cols": config.FEATURE_COLS,
+        "frame": frame,
         # arrays do holdout — pra visualização / inspeção fora daqui
         "X_test": X_test, "y_test": y_test, "y_pred": y_pred, "y_proba": y_proba,
     }

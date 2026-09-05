@@ -218,6 +218,7 @@ transição; a previsão para 2025 é extrapolação.
 │   └── 03_modelo_A_contraexemplo.ipynb         # apêndice: modelo com leakage (inválido)
 ├── src/
 │   ├── config.py                     # paths, seed, schema, target, features
+│   ├── run_all.py                    # pipeline completa (python -m src.run_all)
 │   ├── preprocessing/
 │   │   ├── gold_consumer.py          # consumo da Gold (S3 -> cache)
 │   │   └── features.py               # validação de schema + features defasadas + target
@@ -234,6 +235,8 @@ transição; a previsão para 2025 é extrapolação.
 │   ├── model_card_modelo_d.json      # proveniência da Gold + métricas por execução
 │   └── previsao_risco_2025.csv       # ranking de risco por município
 ├── images/                           # figuras exportadas (.png)
+├── Makefile                          # atalhos (make all / make docker-run)
+├── Dockerfile / docker-compose.yml   # execução reproduzível em container
 ├── requirements.txt
 ├── README.md
 └── .gitignore
@@ -249,7 +252,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-**1. Obter a camada Gold** (só na primeira vez — depois o cache local basta):
+**Obter a camada Gold** (só na primeira vez — depois o cache local basta):
 
 ```bash
 # opção A: baixar do S3 da Fase 2 (requer credenciais AWS em .env — ver .env.example)
@@ -257,20 +260,28 @@ python -m src.preprocessing.gold_consumer --refresh
 # opção B: pedir a um colega os arquivos data/gold/*.parquet
 ```
 
-**2. Treinar e avaliar o modelo:**
+### Pipeline completa — um comando
 
 ```bash
-python -m src.modeling.pipeline_modelo_d      # -> data/model/*.pkl + reports/model_card_modelo_d.json
+python -m src.run_all            # treino → ranking de risco → figuras
+python -m src.run_all --refresh  # + re-baixa a Gold do S3 antes
 ```
 
-**3. Gerar o ranking de risco e as figuras:**
+Saídas: `data/model/*.pkl`, `reports/model_card_modelo_d.json`,
+`reports/previsao_risco_2025.csv`, `images/*.png`.
+
+Com `make` (Linux/macOS/CI): `make all`. Via Docker: `docker compose run --rm pipeline`
+(monta `data/`, `reports/`, `images/` como volumes; usa `.env` para credenciais).
+
+### Passo a passo (equivalente)
 
 ```bash
+python -m src.modeling.pipeline_modelo_d      # treina + model card
 python -m src.modeling.prever_proximo_ano     # -> reports/previsao_risco_2025.csv
 python -m src.visualization.plots             # -> images/*.png
 ```
 
-**4. Notebooks** (kernel = `.venv`), na ordem:
+**Notebooks** (kernel = `.venv`), na ordem:
 `01_consumo_gold` → `02_eda` → `03a_diagnostico_vazamento_dados` →
 `03b_modelo_defasagem_temporal`. O `03_modelo_A_contraexemplo` é apêndice
 (demonstração de *data leakage*, **não** é o modelo da entrega).

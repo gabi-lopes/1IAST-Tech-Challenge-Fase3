@@ -1,6 +1,6 @@
 {
   "modelo": "Modelo D — defasagem temporal (logistic_regression)",
-  "gerado_em": "2026-09-05T16:29:28+00:00",
+  "gerado_em": "2026-09-05T16:55:35+00:00",
   "gold": {
     "dataset": "indicador_municipio",
     "n_linhas": 11030,
