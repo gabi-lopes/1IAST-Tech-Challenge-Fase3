@@ -300,4 +300,8 @@ A Fase 3 **consome** a Gold da Fase 2 como fonte oficial — não a reconstrói.
 
 ## 🎥 Vídeo Executivo
 
-_(link para o vídeo — até 5 minutos)_
+[Post-Tech-FASE-3](https://youtu.be/P9zEotN5_Ak?si=z0ZVUC3habocw0qQ)
+
+## Perguntas Tech Chalenge 3
+
+[Perguntas e repostas](https://docs.google.com/document/d/1UCuw6MQzsXbQWr4HiGb6noI0WdivNU0TPbbNRvWdDWQ/edit?usp=sharing)
